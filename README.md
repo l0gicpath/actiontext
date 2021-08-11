@@ -50,7 +50,7 @@ The effects of that are:
 
 - Nodes process only when all their inputs are satisifed
 - Nodes broadcast only when they've processed
-- Nodes will before processing the next cycle until their previous cycle's output are consumed
+- Nodes will wait before processing the next cycle until their previous cycle's output are consumed
 
 ### Running
 
