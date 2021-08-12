@@ -12,15 +12,48 @@ import (
 
 type Logic func(...interface{}) (interface{}, error)
 
+type NodeInputPortType int
+
+func (typ NodeInputPortType) Zero() interface{} {
+	switch typ {
+	case NodeInputPortTypeString, NodeInputPortTypeText:
+		return ""
+	case NodeInputPortTypeFloat:
+		return 0.0
+	case NodeInputPortTypeInt:
+		return 0
+	default:
+		return nil
+	}
+}
+
+const (
+	NodeInputPortTypeString NodeInputPortType = iota
+	NodeInputPortTypeInt
+	NodeInputPortTypeFloat
+	NodeInputPortTypeText
+)
+
+type NodeInputPort struct {
+	Id    int
+	Label string
+	Type  NodeInputPortType
+	Value interface{}
+	Ch    chan interface{}
+}
+
 type Node struct {
-	Id           int
-	Name         string
-	InLabels     []string
-	InputPorts   []int
-	InputPortChs []chan interface{}
-	OutLabel     string
-	OutputPort   []chan interface{}
-	Logic        Logic
+	Id                 int
+	Name               string
+	unlinkedPortsCount int
+	InputPorts         []*NodeInputPort
+	OutLabel           string
+	OutputPort         []chan interface{}
+	Logic              Logic
+}
+
+func (n *Node) AllPortsLinked() bool {
+	return n.unlinkedPortsCount == 0
 }
 
 func logit(msg string, context *Node, err error) {
@@ -29,6 +62,20 @@ func logit(msg string, context *Node, err error) {
 		logevent = log.Error().Err(err)
 	}
 	logevent.Msgf("%s(%d): %s\n", context.Name, context.Id, msg)
+}
+func (n *Node) LinkPort(id int, ch chan interface{}) {
+	if port := n.Port(id); port != nil {
+		port.Ch = ch
+		n.unlinkedPortsCount--
+	}
+}
+func (n *Node) Port(id int) *NodeInputPort {
+	for _, port := range n.InputPorts {
+		if port.Id == id {
+			return port
+		}
+	}
+	return nil
 }
 
 func (n *Node) Process(ctx context.Context) {
@@ -44,9 +91,12 @@ func (n *Node) Process(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		default:
-			if n.InputPortChs != nil && len(n.InputPortChs) == len(n.InputPorts) {
-				for _, inCh := range n.InputPortChs {
-					val := <-inCh
+			if n.InputPorts != nil {
+				for _, port := range n.InputPorts {
+					val := port.Value
+					if port.Ch != nil {
+						val = <-port.Ch
+					}
 					executionArgs = append(executionArgs, val)
 				}
 			}
@@ -65,38 +115,43 @@ func (n *Node) Process(ctx context.Context) {
 
 func newNode(def NodeDefinition) *Node {
 	node := Node{
-		Id:           0,
-		Name:         def.Name,
-		InLabels:     def.InLabels,
-		InputPorts:   make([]int, len(def.InLabels)),
-		InputPortChs: make([]chan interface{}, 0),
-		OutLabel:     def.OutputLabel,
-		OutputPort:   make([]chan interface{}, 0),
-		Logic:        def.Logic,
+		Id:         program.NextID(),
+		Name:       def.Name,
+		OutLabel:   def.OutputLabel,
+		OutputPort: make([]chan interface{}, 0),
+		Logic:      def.Logic,
 	}
-	if len(node.InputPorts) == 0 {
-		node.InputPortChs = nil
+	if def.Inputs != nil {
+		node.InputPorts = make([]*NodeInputPort, 0)
+		node.unlinkedPortsCount = len(def.Inputs)
+		for label, typ := range def.Inputs {
+			node.InputPorts = append(node.InputPorts, &NodeInputPort{
+				Id:    program.NextID(),
+				Label: label,
+				Type:  typ,
+				Value: typ.Zero(),
+				Ch:    nil,
+			})
+		}
 	}
-
 	return &node
 }
 
+type NodeInputs map[string]NodeInputPortType
+
 type NodeDefinition struct {
 	Name        string
-	InLabels    []string
+	Inputs      NodeInputs
 	OutputLabel string
 	Logic       Logic
 }
 
 var library []NodeDefinition
 
-func defineNode(name string, inputs []string, outputLabel string, logic Logic) {
-	if inputs == nil {
-		inputs = make([]string, 0)
-	}
+func defineNode(name string, inputs NodeInputs, outputLabel string, logic Logic) {
 	library = append(library, NodeDefinition{
 		Name:        name,
-		InLabels:    inputs,
+		Inputs:      inputs,
 		OutputLabel: outputLabel,
 		Logic:       logic,
 	})
@@ -113,7 +168,10 @@ func libraryDefinitions() {
 	)
 	defineNode(
 		"Math/add",
-		[]string{"number 1", "number 2"},
+		NodeInputs{
+			"number 1": NodeInputPortTypeInt,
+			"number 2": NodeInputPortTypeInt,
+		},
 		"result",
 		func(args ...interface{}) (interface{}, error) {
 			if len(args) < 2 {
@@ -126,7 +184,10 @@ func libraryDefinitions() {
 	)
 	defineNode(
 		"Math/subtract",
-		[]string{"number 1", "number 2"},
+		NodeInputs{
+			"number 1": NodeInputPortTypeInt,
+			"number 2": NodeInputPortTypeInt,
+		},
 		"result",
 		func(args ...interface{}) (interface{}, error) {
 			if len(args) < 2 {
@@ -139,7 +200,9 @@ func libraryDefinitions() {
 	)
 	defineNode(
 		"IO/println",
-		[]string{"data"},
+		NodeInputs{
+			"data": NodeInputPortTypeString,
+		},
 		"",
 		func(args ...interface{}) (interface{}, error) {
 			if len(args) > 0 {
@@ -187,9 +250,6 @@ func loop() {
 					return g.Selectable(nd.Name).OnClick(func() {
 						node := newNode(nd)
 						program.AddNode(node)
-						for i := range node.InputPorts {
-							node.InputPorts[i] = program.NextID()
-						}
 						mousePos := g.GetMousePos()
 						imgui.ImNodesSetNodeScreenSpacePos(node.Id, g.ToVec2(mousePos))
 					})
@@ -204,13 +264,33 @@ func loop() {
 				imgui.ImNodesBeginNodeTitleBar()
 				g.Label(node.Name).Build()
 				imgui.ImNodesEndNodeTitleBar()
-				for i, inLabel := range node.InLabels {
-					imgui.ImNodesBeginInputAttribute(node.InputPorts[i])
-					w := imgui.CalcTextSize(inLabel, false, 256).X
-					imgui.PushItemWidth(float32(nodeWidth) - w)
-					g.Label(inLabel).Build()
-					imgui.PopItemWidth()
-					imgui.ImNodesEndInputAttribute()
+				if node.InputPorts != nil {
+					for _, inputPort := range node.InputPorts {
+						imgui.ImNodesBeginInputAttribute(inputPort.Id)
+						w := imgui.CalcTextSize(inputPort.Label, false, 256).X
+						// imgui.PushItemWidth(float32(nodeWidth) - w)
+						// imgui.PopItemWidth()
+						g.Label(inputPort.Label).Build()
+						if inputPort.Ch == nil {
+							g.SameLine()
+							switch inputPort.Type {
+							case NodeInputPortTypeFloat:
+								val := (inputPort.Value.(float32))
+								g.InputFloat("##hidelabel", &val).Size(float32(nodeWidth) - w).Build()
+							case NodeInputPortTypeInt:
+								val := int32((inputPort.Value.(int)))
+								g.InputInt(&val).OnChange(func() {
+									inputPort.Value = int(val)
+								}).Size(float32(nodeWidth) - w).Build()
+							case NodeInputPortTypeString:
+								val := (inputPort.Value.(string))
+								g.InputText(&val).OnChange(func() {
+									inputPort.Value = val
+								}).Size(float32(nodeWidth) - w).Build()
+							}
+						}
+						imgui.ImNodesEndInputAttribute()
+					}
 				}
 
 				if len(node.OutLabel) > 0 {
@@ -239,7 +319,7 @@ func loop() {
 				producerNode := program.Node(int(fromId))
 				consumerNode := program.Node(int(toId))
 				ch := make(chan interface{})
-				consumerNode.InputPortChs = append(consumerNode.InputPortChs, ch)
+				consumerNode.LinkPort(int(inputPort), ch)
 				producerNode.OutputPort = append(producerNode.OutputPort, ch)
 
 				program.AddEdge(int(outputPort), int(inputPort))
@@ -279,21 +359,18 @@ func (g *Graph) NextID() int {
 }
 
 func (g *Graph) AddNode(n *Node) int {
-	n.Id = g.IdCounter
 	g.Nodes = append(g.Nodes, n)
-	g.IdCounter += 1
 	return n.Id
 }
 
 func (g *Graph) AddEdge(from, to int) int {
 	edge := &Edge{
-		Id:   g.IdCounter,
+		Id:   g.NextID(),
 		From: from,
 		To:   to,
 	}
 
 	g.Edges[edge.Id] = append(g.Edges[edge.Id], edge)
-	g.IdCounter += 1
 	return edge.Id
 }
 
