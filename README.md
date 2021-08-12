@@ -3,7 +3,7 @@
 **ActionText is an experiment** in its early stage of infancy. It's a visual node-based programming proof of concept that I built for myself and intend to continue developing it. It's open source and will continue to be
 as such for the foreseeable future.
 
-![Show don't tell](docs/showcase.png)
+![Show don't tell](docs/showcase2.png)
 
 The project will serve a number of purposes:
 
