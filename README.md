@@ -48,7 +48,7 @@ when a node wants to output a value, natural backpressure in the graph is formed
 
 The effects of that are: 
 
-- Nodes process only when all their inputs are satisifed
+- Nodes process only when all their inputs are satisifed (Node inputs can be satisifed either through default port values, values set in the UI or through linkage)
 - Nodes broadcast only when they've processed
 - Nodes will wait before processing the next cycle until their previous cycle's output are consumed
 
